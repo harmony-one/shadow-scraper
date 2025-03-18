@@ -143,6 +143,10 @@ const main = async () => {
         console.log('____________');
 
         await analyzePoolVolume('SwapX: wstkscUSD/scUSD', 'export/swap_x_wstkscUSD.scUSD_1742246881.csv');
+
+        console.log('____________');
+
+        await analyzePoolVolume('SwapX: USDC.e/scUSD', 'export/swap_x_swaps_USDC.e_scUSD_1742306050.csv');
     } catch (error: any) {
         console.error(`Error: ${error?.message}`);
     }

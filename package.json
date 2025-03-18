@@ -11,7 +11,9 @@
     "beefy": "nodemon src/beefy/index.ts",
     "vfat": "nodemon src/vfat/index.ts",
     "portfolio": "nodemon src/portfolio-tracker/index.ts",
-    "export_shadow_trades": "nodemon src/shadow_trades/export_trades.ts"
+    "export_shadow_trades": "nodemon src/shadow_trades/export_trades.ts",
+    "export_swap_x_trades": "nodemon src/swap_x_trades/export_trades.ts",
+    "analyze_trades": "nodemon src/analyze/analyze_trades_volume.ts"
   },
   "keywords": [],
   "author": "",
