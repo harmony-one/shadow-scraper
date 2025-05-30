@@ -114,6 +114,58 @@ async function getUserLiquidityInfoV2(
 
 }
 
+
+// Balancer V3 doesn't index swaps
+export async function getPoolSwapsV2(
+  poolId: string,
+  positionStartTimestamp: number
+): Promise<any> {
+  const subgraphQuery = `
+{
+    swaps(
+      where: {
+        poolId_contains: "${poolId}"
+        timestamp_gte: ${positionStartTimestamp}
+      }
+      first: 1000
+      orderBy: timestamp
+      orderDirection: desc
+    ) {
+      id
+      poolId {
+        id
+        address
+      }
+      tokenIn
+      tokenOut
+      tokenInSym
+      tokenOutSym
+      tokenAmountIn
+      tokenAmountOut
+      valueUSD
+      timestamp
+      block
+      userAddress
+      caller
+    }
+  }
+  `;
+
+  const response = await balancerV2Client.post("", { query: subgraphQuery });
+  if (response.data.errors) {
+    console.error("GraphQL errors:", response.data.errors);
+    throw new Error(
+      "GraphQL query failed: " + JSON.stringify(response.data.errors)
+    );
+  }
+
+  if (!response.data.data) {
+    console.error("No data returned from the GraphQL query");
+    throw new Error("No data returned from the GraphQL query");
+  }
+  return response.data.data;
+}
+
 async function getUserLiquidityInfoV3(
   userAddress: string,
   poolId: string
@@ -361,3 +413,5 @@ interface LiquidityInfo {
     };
   }[];
 }
+
+

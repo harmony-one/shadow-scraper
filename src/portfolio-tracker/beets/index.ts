@@ -7,6 +7,7 @@ import {
   roundToSignificantDigits,
 } from "../helpers";
 import {
+  calculateUserSwapFeeRewardsFromSubgraph,
   calculateV3Yield,
   getTokenReward,
   getUnderlyingTokenUSDPrice,
@@ -66,7 +67,9 @@ const vaultArray = [
 export const getBeetsInfo = async (walletAddress: string) => {
   const portfolioItems: PortfolioItem[] = [];
   const formattedWalletAddress = ethers.getAddress(walletAddress);
+  
   const vaultPromises = vaultArray.map(async (vault) => {
+        
     const userLiquidityInfo = await getUserLiquidityInfo(
       formattedWalletAddress,
       vault.poolId,
@@ -81,8 +84,10 @@ export const getBeetsInfo = async (walletAddress: string) => {
     let token0rewards = undefined;
     let token1rewards = undefined;
     let totalRewards = 0;
-    let apr = 0;
     let staked = false;
+    let mainApr = 0;
+    let secondaryApr = 0;
+    let totalApr = 0
     
     if (!initialDeposit) {
       return;
@@ -101,7 +106,7 @@ export const getBeetsInfo = async (walletAddress: string) => {
 
     const currentTokenBalances: any[] = [];
 
-    // Process tokens
+      // Process tokens
     const tokensDepositedPromises = initialDeposit.amounts
       .map(async (amount: string, index: number) => {
         const token = initialDeposit.pool.tokens[index];
@@ -183,7 +188,7 @@ export const getBeetsInfo = async (walletAddress: string) => {
           : undefined;
         totalRewards =
           token0rewards.rewardValue + (token1rewards?.rewardValue ?? 0);
-        apr = calculateAPR(
+        mainApr = calculateAPR(
           totalDepositValue,
           bptPositionValue - totalDepositValue,
           daysElapsed
@@ -199,7 +204,7 @@ export const getBeetsInfo = async (walletAddress: string) => {
         const tokenRewards = result.rewards;
         const beetsReward = tokenRewards.find((t: any) => (t.name = "beets"));
         totalRewards = beetsReward?.rewardValue ?? 0;
-        apr = beetsReward
+        mainApr = beetsReward
           ? calculateAPR(
               totalDepositValue,
               beetsReward?.rewardValue,
@@ -211,7 +216,26 @@ export const getBeetsInfo = async (walletAddress: string) => {
           rewardValue: beetsReward?.rewardValue ?? "",
           symbol: beetsReward?.symbol.toLowerCase() ?? "",
         };
+        
+        const swapFeeRewards  = await calculateUserSwapFeeRewardsFromSubgraph(vault.poolId, vault.gaugeAddress, formattedWalletAddress, initialDeposit?.timestamp)
+        
+        if (totalDepositValue > 0 && swapFeeRewards.userSwapFeeRewardsUSD > 0) {
+          secondaryApr = calculateAPR(
+          totalDepositValue, 
+          swapFeeRewards.userSwapFeeRewardsUSD, 
+          daysElapsed);
+        }
+        if (secondaryApr > 0) {
+          token1rewards = {
+            rewardAmount: swapFeeRewards.userSwapFeeRewardsUSD ?? "",
+            rewardValue: swapFeeRewards.userSwapFeeRewardsUSD ?? "",
+            symbol: "Swaps Fees",
+          };
+        }
+        console.log('Swap Fee APR:', secondaryApr)
+        console.log('Beets APR', mainApr)
       }
+
     } else {
       // balancer v3
       const v3YieldData = await calculateV3Yield(initialDeposit);
@@ -234,11 +258,14 @@ export const getBeetsInfo = async (walletAddress: string) => {
 
       totalRewards = +token0rewards.rewardValue + +token1rewards.rewardValue;
 
-      apr =
+      mainApr =
         totalRewards > 0
           ? calculateAPR(totalDepositValue, totalRewards, daysElapsed)
           : 0;
     }
+    
+    totalApr = mainApr + secondaryApr
+    
     const portfolioItem: PortfolioItem = {
       ...portfolioItemFactory(),
       type: vault.type,
@@ -271,9 +298,11 @@ export const getBeetsInfo = async (walletAddress: string) => {
       rewardAsset1:
         vault.balancerVersion === BALANCER_VERSION.v3
           ? token1rewards?.symbol || ""
-          : tokensDeposited[1] && token1rewards
-            ? tokensDeposited[1].symbol
-            : "",
+          : staked 
+            ? token1rewards?.symbol || ""
+            : tokensDeposited[1] && token1rewards
+              ? tokensDeposited[1].symbol
+              : "",
       rewardAmount0: token0rewards
         ? roundToSignificantDigits(token0rewards.rewardAmount.toString())
         : "",
@@ -289,7 +318,7 @@ export const getBeetsInfo = async (walletAddress: string) => {
       rewardValue: roundToSignificantDigits(totalRewards.toString(), 2),
       totalDays: roundToSignificantDigits(`${daysElapsed}`, 4),
       totalBlocks: `${totalBlocks}`,
-      apr: roundToSignificantDigits(apr.toString()),
+      apr: roundToSignificantDigits(totalApr.toString()),
       depositLink: vault.url,
     };
 

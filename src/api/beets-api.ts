@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 import ERC20_ABI from "../abi/ERC20.json";
 import { CoinGeckoTokenIdsMap, getTokenPrice, getTokenPriceDate } from "./coingecko";
-import { calculateAPR } from "../portfolio-tracker/helpers";
+import { getPoolSwapsV2 } from "./beets-subgraph";
 
 const provider = new ethers.JsonRpcProvider("https://rpc.soniclabs.com");
 
@@ -9,6 +9,32 @@ const RATE_PROVIDER_CONTRACT_ADDRESS : { [key: string]: string }  = {
   'wasonicsolvbtcbbn': '0x00dE97829D01815346e58372be55aeFD84CA2457',
   'wasonicsolvbtc': '0xa6C292D06251dA638Be3B58f1473E03d99C26FF0'
 }
+
+export const POOL_ABI = [
+  // LP Token / BPT related functions
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+  "function totalSupply() view returns (uint256)",
+  "function balanceOf(address account) view returns (uint256)",
+  
+  // Pool-specific functions
+  "function getPoolId() view returns (bytes32)",
+  "function getSwapFeePercentage() view returns (uint256)",
+  "function getVault() view returns (address)",
+  
+  // Some pools might have these
+  "function getBptToken() view returns (address)",
+  "function getTokens() view returns (address[] tokens, uint256[] balances, uint256 lastChangeBlock)",
+  
+  // Pool state functions
+  "function getRate() view returns (uint256)",
+  "function getNormalizedWeights() view returns (uint256[])",
+  
+  // Events for tracking
+  "event Swap(bytes32 indexed poolId, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut)",
+  "event Transfer(address indexed from, address indexed to, uint256 value)"
+];
 
 const GAUGE_ABI = [
   {
@@ -102,7 +128,7 @@ export async function getUserGaugeRewards(
   const rewardTokenAddresses = await Promise.all(rewardTokenPromises);
  
   const rewardPromises = rewardTokenAddresses.map(async (rewardTokenAddress, i) => {
-
+    
     const tokenContract = new ethers.Contract(
       rewardTokenAddress,
       ERC20_ABI,
@@ -122,7 +148,6 @@ export async function getUserGaugeRewards(
       gaugeContract.claimable_reward(userAddress, rewardTokenAddress),
       gaugeContract.claimed_reward(userAddress, rewardTokenAddress)
     ]);
-
     const claimableBN = BigInt(claimableAmount);
     const claimedBN = BigInt(claimedAmount);
     const totalEarned = claimableBN + claimedBN;
@@ -255,3 +280,140 @@ export async function calculateV3Yield(
     token1Yield: tokenYields[1] || null,
   };
 }
+
+export async function getLPTokenAddress(poolAddress: string) {
+  const poolContract = new ethers.Contract(poolAddress, POOL_ABI, provider);
+  
+  try {
+    // Try getBptToken first (some pools have this)
+    const bptToken = await poolContract.getBptToken();
+    return bptToken;
+  } catch {
+    try {
+      // Check if pool has standard ERC20 functions (means it IS the LP token)
+      await poolContract.symbol();
+      return poolAddress; // Pool address IS the LP token address
+    } catch {
+      console.log("Could not determine LP token address for pool:", poolAddress);
+      return poolAddress; // Default fallback
+    }
+  }
+}
+
+export async function calculateUserSwapFeeRewardsFromSubgraph(
+  poolId: string,
+  gaugeAddress: string,
+  userAddress: string,
+  positionStartTimestamp: number
+) {
+  
+  // Query subgraph for swaps (much faster!)
+  const result = await getPoolSwapsV2(poolId.toLowerCase(), positionStartTimestamp)
+  
+  if (!result.swaps || result.swaps.length === 0) {
+    return {
+      userPoolShare: 0,
+      totalFeesCollectedUSD: 0,
+      userSwapFeeRewardsUSD: 0,
+      swapCount: 0,
+      feePercentage: 0
+    };
+  }
+
+  // Get user's LP balance from gauge
+  const gaugeContract = new ethers.Contract(gaugeAddress, GAUGE_ABI, provider);
+  const poolContract = new ethers.Contract(poolId, POOL_ABI, provider);
+  
+  const [userLPBalance, totalLPSupply, swapFeePercentage] = await Promise.all([
+    gaugeContract.balanceOf(userAddress),
+    poolContract.totalSupply(),
+    poolContract.getSwapFeePercentage()
+  ]);
+  
+  const userPoolShare = Number(ethers.formatEther(userLPBalance)) / 
+                       Number(ethers.formatEther(totalLPSupply));
+  
+
+  // Calculate total fees in USD
+  let totalFeesUSD = 0;
+  const feePercentage = Number(ethers.formatUnits(swapFeePercentage, 18));
+  
+  for (const swap of result.swaps) {
+    const swapFeeUSD = Number(swap.valueUSD) * feePercentage;
+    totalFeesUSD += swapFeeUSD;
+  }
+  
+  return {
+    userPoolShare: userPoolShare * 100,
+    totalFeesCollectedUSD: totalFeesUSD,
+    userSwapFeeRewardsUSD: totalFeesUSD * userPoolShare,
+    swapCount: result.swaps.length,
+    feePercentage: feePercentage * 100
+  };
+}
+
+
+// const VAULT_ADDRESS = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
+
+// const VAULT_ABI = [
+//   "event Swap(bytes32 indexed poolId, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut)"
+// ];
+
+// export async function calculateUserSwapFeeRewards(
+//   poolAddress: string,
+//   gaugeAddress: string, // Add gauge address parameter
+//   userAddress: string,
+//   positionStartBlock: number
+// ) {
+//   const vaultContract = new ethers.Contract(VAULT_ADDRESS, VAULT_ABI, provider);
+//   const poolContract = new ethers.Contract(poolAddress, POOL_ABI, provider);
+//   const gaugeContract = new ethers.Contract(gaugeAddress, GAUGE_ABI, provider); // Add gauge
+
+//   const [poolId, swapFeePercentage, userLPBalance, totalLPSupply] = await Promise.all([
+//     poolContract.getPoolId(),
+//     poolContract.getSwapFeePercentage(),
+//     gaugeContract.balanceOf(userAddress), // Get from gauge, not pool
+//     poolContract.totalSupply()
+//   ]);
+  
+//   // Calculate user's % ownership of the pool
+//   const userPoolShare = Number(ethers.formatEther(userLPBalance)) / 
+//                        Number(ethers.formatEther(totalLPSupply));
+  
+//   // Get all swap events since position was created
+//   const swapFilter = vaultContract.filters.Swap(poolId);
+  
+//   const swapEvents = await vaultContract.queryFilter(swapFilter, positionStartBlock);
+  
+//   let totalFeesCollected = 0;
+//   let swapCount = 0;
+  
+//   // Calculate total fees collected from swaps
+//   for (const event of swapEvents) {
+//     const parsedEvent: any = vaultContract.interface.parseLog(event);
+//     const { amountIn, tokenIn } = parsedEvent.args;
+    
+//     // DEBUG: Log the actual values to see what's wrong
+//     console.log('AmountIn raw:', amountIn.toString());
+//     console.log('AmountIn formatted:', ethers.formatUnits(amountIn, 18));
+//     console.log('SwapFeePercentage:', ethers.formatUnits(swapFeePercentage, 18));
+    
+//     const swapFee = Number(ethers.formatUnits(amountIn, 18)) * 
+//                   Number(ethers.formatUnits(swapFeePercentage, 18));
+    
+//     console.log('Calculated fee for this swap:', swapFee);
+//     totalFeesCollected += swapFee;
+//   }
+  
+//   // User's proportional share of all fees collected
+//   const userSwapFeeRewards = totalFeesCollected * userPoolShare;
+  
+//   return {
+//     userPoolShare: userPoolShare * 100, // as percentage
+//     totalFeesCollected,
+//     userSwapFeeRewards,
+//     swapCount,
+//     positionStartBlock,
+//     feePercentage: Number(ethers.formatUnits(swapFeePercentage, 18)) * 100
+//   };
+// }
